@@ -175,19 +175,19 @@ def my_rag_chain(query: str):
 
     # 3. LLM 生成回答
     prompt = f"""请你作为一个知识助手，根据下面提供的【参考资料】回答用户的【问题】。
-如果资料里没有相关信息，直接说“资料中未提及相关内容”，生成准确内容。
+如果资料里没有相关信息，直接说“资料中未提及相关内容”，可适当在【参考资料】的基础上通过训练数据生成与【问题】相关的准确内容。
 
 【问题】
 {query}
 【参考资料】
 {"\n\n".join(reranked_chunks)}
 
-请基于上述内容作答，模仿人类的助手说话，不要编造信息。"""
+请基于上述内容作答，模仿人类的助手说话，语义清晰连贯，有适当分点，不要编造信息。"""
 
     response = ds_client.chat.completions.create(
         model="deepseek-v4-flash",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.1,
+        temperature=0.2,
     )
     return response.choices[0].message.content
 
