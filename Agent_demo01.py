@@ -3,7 +3,7 @@ os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 import torch
 
 #LangGraph 相关依赖
-from langgraph.graph import StateGraph, END, MessagesState
+from langgraph.graph import StateGraph, END, MessagesState,START
 from dotenv import load_dotenv
 from typing import List
 
@@ -13,14 +13,14 @@ from langchain.tools import tool
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from openai import OpenAI
 
 # RAG 向量、重排相关导入
 import chromadb
-from sentence_transformers import SentenceTransformer, CrossEncoder
-from openai import OpenAI
+from sentence_transformers import SentenceTransformer, CrossEncoder,util
 
 #文本预处理
-import fitz  # PyMuPDF  文本加载--->pdf解析
+import fitz    # PyMuPDF  文本加载--->pdf解析
 import re      #文本清洗
 
 # 物理核心8核
@@ -42,7 +42,6 @@ ds_client = OpenAI(
     api_key=os.getenv("api_key"),
     base_url="https://api.deepseek.com/v1"
 )
-
 # 2. 向量模型、重排模型全局加载
 embedding_model = SentenceTransformer("shibing624/text2vec-base-chinese")
 cross_encoder = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
@@ -148,6 +147,67 @@ if chromadb_collection.count() == 0:
 else:
     print(f"已加载持久化向量库，现有文档总数：{chromadb_collection.count()}")
 
+#意图识别函数--->余弦相似度
+def semantic_intent(query: str) -> str:
+    """
+    语义相似度二分类：返回 chat / knowledge
+    """
+    # 定义两类意图标准句
+    chat_prompt = "日常闲聊、打招呼、寒暄对话"
+    knowledge_prompt = "知识查询、文档检索、概念问答"
+
+    # 向量化，必须传入列表
+    q_emb = embedding_model.encode([query], convert_to_tensor=True)
+    chat_emb = embedding_model.encode([chat_prompt], convert_to_tensor=True)
+    knowledge_emb = embedding_model.encode([knowledge_prompt], convert_to_tensor=True)
+
+    # 计算相似度
+    score_chat = util.cos_sim(q_emb, chat_emb).item()
+    score_know = util.cos_sim(q_emb, knowledge_emb).item()
+
+    threshold = 0.02
+    if score_know - score_chat > threshold:
+        return "knowledge"
+    elif score_chat - score_know > threshold:
+        return "chat"
+    else:
+        # 分数接近，留给LLM仲裁
+        return "unknown"
+#意图识别函数--->LLM
+def llm_router(query: str) -> str:
+    """
+       LLM兜底意图仲裁
+       返回值： "chat" 闲聊 | "knowledge" 知识库问答
+       """
+    prompt = f"""你是一个人类语言情感分析专家
+    请判断用户提问属于【闲聊对话】还是【知识库知识查询】
+    规则：
+    1. 闲聊chat：打招呼、感慨、日常聊天、情绪抒发，不需要查询文档资料
+    2. 知识查询knowledge：询问定义、原理、步骤、文档相关内容，需要检索知识库
+    只允许输出单词，严格只能输出 chat 或者 knowledge，不要额外文字！
+
+    用户问题：{query}
+    结果：
+    """
+    resp = ds_client.chat.completions.create(
+        model="deepseek-v4-flash",
+        messages=[
+            {"role": "system", "content": prompt},
+            {"role":"user", "content": query}
+            ],
+        temperature=0.0,
+        max_tokens=10
+    )
+    raw_text = resp.choices[0].message.content
+    # 正则提取目标关键词，抵御模型乱输出
+    if re.search(r"\bknowledge\b", raw_text):
+        return "knowledge"
+    elif re.search(r"\bchat\b", raw_text):
+        return "chat"
+    else:
+        # 无法识别默认走知识库查询，避免漏召回
+        return "knowledge"
+
 # ===================== RAG 核心函数（仅检索+生成，无重复加载） =====================
 def my_rag_chain(query: str):
     # 1. 向量召回
@@ -175,7 +235,11 @@ def my_rag_chain(query: str):
 
     # 3. LLM 生成回答
     prompt = f"""请你作为一个知识助手，根据下面提供的【参考资料】回答用户的【问题】。
-如果资料里没有相关信息，直接说“资料中未提及相关内容”，可适当在【参考资料】的基础上通过训练数据生成与【问题】相关的准确内容。
+如果资料里没有相关信息，直接说“资料中未提及相关内容”，生成与【问题】相关的准确内容。
+    强制要求：
+    1. ✅ **先检索知识库**：收到问题后，第一时间调用搜索工具查找相关内容
+    2. ✅ **再整理回答**：基于知识库返回的结果，并整理成自然语言回复
+    3. ✅ **知识库无结果时**：再依赖自身知识补充回答，并说明详细情况  
 
 【问题】
 {query}
@@ -207,13 +271,13 @@ tools = [search_my_knowledge]
 agent = create_agent(
     model=llm,
     tools=tools,
-    system_prompt="你是一个专业的知识助手，可以调用知识库工具回答用户问题，工具返回结果后整理成自然回答给用户",
+    system_prompt="你是一个专业的知识助手，必须优先调用知识库工具回答用户问题，工具返回结果后整理成自然回答给用户，如果知识库没有该问题的相关内容，才利用自身训练数据回答",
 )
 
 class ChatState(MessagesState):
     query: str
     answer: str
-def chatbot_node(state: ChatState):
+def agent_node(state: ChatState):
     result = agent.invoke({"messages":state["messages"]})
     final_msg = result["messages"][-1]
     return {
@@ -221,10 +285,72 @@ def chatbot_node(state: ChatState):
         "answer": final_msg.content
     }
 
+def chatbot_node(state: ChatState):
+    response = app.invoke({"messages":state["messages"]})
+    return {
+        "messages": [response],
+        "answer": response.content
+    }
+
+def router(state:ChatState):  #路由节点----->混合路由仲裁
+    query = state["query"]
+    # ========= 第一级：规则快筛层 =========
+    # 仲裁规则：方法一和方法二只要有一个明确判断，就采纳；若两者结论相反，触发兜底。
+
+    # 方法一：关键词匹配
+    chat_kw = [
+        "你好", "嗨", "hi", "哈喽", "在吗", "在不在","谢谢", "感谢", "多谢",
+        "再见", "拜拜", "回见","哈哈", "哈哈哈", "嘿嘿", "笑死",
+        "你是谁", "你叫什么", "你能干什么","早上好", "下午好", "晚上好",
+        "吃饭了吗", "最近怎么样", "有空吗","最近","忙吗","hello","fun"
+    ]
+    knowledge_kw = [
+        "是什么", "什么是", "啥是","怎么", "怎么样", "怎么做",
+        "如何", "如何实现", "如何使用","定义", "概念", "含义",
+        "文档", "资料", "参考","查询", "检索", "查找",
+        "原理", "机制", "逻辑","步骤", "流程", "操作",
+        "方法", "方式", "方案","教程", "指南", "实例",
+        "区别", "对比", "优缺点","原因", "为什么", "注意事项"
+    ]
+
+    is_chat_kw = any(kw in query for kw in chat_kw)
+    is_knowledge_kw = any(kw in query for kw in knowledge_kw)
+    # 方法二：语义相似度匹配（用你本地的轻量模型）
+    # 利用语义判断函数semantic_intent(query) 返回 "chat" 或 "knowledge"
+    intent_semantic = semantic_intent(query)
+
+    # ========= 第二级：仲裁逻辑 =========
+    #冲突处理前提:如果两种关键字都包含,直接给大模型兜底,跳过语义分析函数
+    if is_chat_kw and is_knowledge_kw:
+        is_chat_kw =False
+        is_knowledge_kw = False
+    # 情况1. 如果方法一和方法二都指向A，那就走A
+    if is_knowledge_kw and intent_semantic =="knowledge":
+        return "agent_node"
+    if is_chat_kw and intent_semantic=="chat":
+        return "chatbot_node"
+    # 情况2：出现冲突，交给LLM仲裁
+    llm_intent = llm_router(query)
+    if llm_intent == "knowledge":
+        return "agent_node"
+    else:
+        return "chatbot_node"
+
 graph = StateGraph(ChatState)
+graph.add_node("agent",agent_node)
+graph.add_node("router",router)
 graph.add_node("chatbot",chatbot_node)
-graph.set_entry_point("chatbot")
-graph.add_edge("chatbot", END)
+
+graph.add_conditional_edges(
+    "__start__",
+    router,
+    {
+        "agent_node":"agent",
+        "chatbot_node":"chatbot"
+    }
+)
+graph.add_edge("agent",END)
+graph.add_edge("chatbot",END)
 
 app = graph.compile()
 # ===================== 调用测试 =====================
