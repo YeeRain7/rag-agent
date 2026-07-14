@@ -14,3 +14,6 @@ chroma_db_agent/
 
 # 虚拟环境
 venv/
+
+#知识库文件
+knowledge_base/
