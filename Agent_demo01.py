@@ -6,11 +6,12 @@ import torch
 from langgraph.graph import StateGraph, END, MessagesState,START
 from dotenv import load_dotenv
 from typing import List
+from langgraph.checkpoint.memory import MemorySaver
 
 # LangChain 相关导入
 from langchain.agents import create_agent
 from langchain.tools import tool
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
@@ -236,10 +237,14 @@ def my_rag_chain(query: str):
     # 3. LLM 生成回答
     prompt = f"""请你作为一个知识助手，根据下面提供的【参考资料】回答用户的【问题】。
 如果资料里没有相关信息，直接说“资料中未提及相关内容”，生成与【问题】相关的准确内容。
-    强制要求：
-    1. ✅ **先检索知识库**：收到问题后，第一时间调用搜索工具查找相关内容
-    2. ✅ **再整理回答**：基于知识库返回的结果，并整理成自然语言回复
-    3. ✅ **知识库无结果时**：再依赖自身知识补充回答，并说明详细情况  
+    硬性约束：
+    1. 收到问题后，必须围绕【用户最新一轮提问】执行;
+    2. 用户询问知识库相关技术问题，**必须优先调用search_my_knowledge工具检索和【用户原始问题】直接相关的资料**
+    3. 如果检索段落内容和用户问题无关，直接丢弃，绝对不能写入回答；
+    4. 禁止强行拼接无关文档内容；
+    5. 整理回答：基于知识库返回的结果，并整理成自然语言回复
+    6. 若没有有效相关资料，如实说明“知识库暂无相关内容”，不要编造、不要引用无关信息。
+    7. 禁止在未检索知识库的情况下，直接闲聊、反问用户；
 
 【问题】
 {query}
@@ -277,12 +282,24 @@ agent = create_agent(
 class ChatState(MessagesState):
     query: str
     answer: str
+    search_hint:str | None  #仅用于本轮检索临时提示
 def agent_node(state: ChatState):
-    result = agent.invoke({"messages":state["messages"]})
+    messages = state["messages"]
+    search_hint = state.get("search_hint")
+
+    # 如果存在反思生成的检索优化词，追加提示给Agent
+    if search_hint:
+        hint_msg = SystemMessage(content=f"知识库检索优先使用关键词：{search_hint}")
+        invoke_messages = messages + [hint_msg]
+    else:
+        invoke_messages = messages
+
+    result = agent.invoke({"messages": invoke_messages})
     final_msg = result["messages"][-1]
     return {
         "messages": [final_msg],
-        "answer": final_msg.content
+        "answer": final_msg.content,
+        "search_hint":None
     }
 
 def chatbot_node(state: ChatState):
@@ -292,7 +309,10 @@ def chatbot_node(state: ChatState):
         "answer": response.content
     }
 
-def router(state:ChatState):  #路由节点----->混合路由仲裁
+#路由节点----->混合路由仲裁
+def router(state:ChatState):
+    # 新用户请求进入分支前，强制清理上一轮残留检索提示
+    state["search_hint"] = None
     query = state["query"]
     # ========= 第一级：规则快筛层 =========
     # 仲裁规则：方法一和方法二只要有一个明确判断，就采纳；若两者结论相反，触发兜底。
@@ -336,10 +356,50 @@ def router(state:ChatState):  #路由节点----->混合路由仲裁
     else:
         return "chatbot_node"
 
+#反思评估节点
+def reflection_node(state: ChatState):
+    query = state["query"]
+    answer = state["answer"]
+
+    reflection_prompt = f"""
+    用户问题:{query}
+    系统回答:{answer}
+
+    评估规则：
+    1. 判断回答是否准确、完整回答用户问题。
+    2. 对于定义、概念类问题，追求清晰准确就行，不需要重试。
+    3. 如果回答信息不足、内容错误，输出格式：
+    `需要重试|优化检索关键词：xxx`
+    4. 如果回答合格，直接输出：`不需要重试`
+    
+    示例：
+    需要重试|优化检索关键词：RAG技术原理
+    不需要重试
+    只允许使用以上两种格式输出！
+    """
+    response = llm.invoke(reflection_prompt)
+    content = response.content.strip()
+
+    # ... 评估逻辑 ...
+    if content.startswith("需要重试|"):
+        # 拆分得到优化后的检索关键词
+        _, new_search_query = content.split("|")
+        return {"search_hint":new_search_query,"need_retry": True, "retry_count": state.get("retry_count", 0) + 1}
+    else:
+        return {"need_retry": False, "final_answer": answer}
+
+# 反思条件路由
+def should_retry(state: ChatState):
+    if state.get("need_retry") and state.get("retry_count",0)<2:
+        return "agent_node"
+    else:
+        return END
+
 graph = StateGraph(ChatState)
 graph.add_node("agent",agent_node)
 graph.add_node("router",router)
 graph.add_node("chatbot",chatbot_node)
+graph.add_node("reflection",reflection_node)
 
 graph.add_conditional_edges(
     "__start__",
@@ -349,19 +409,23 @@ graph.add_conditional_edges(
         "chatbot_node":"chatbot"
     }
 )
-graph.add_edge("agent",END)
+graph.add_edge("agent","reflection")
+graph.add_conditional_edges(
+    "reflection",
+    should_retry,
+    {"agent_node":"agent",
+                END:END
+     }
+)
 graph.add_edge("chatbot",END)
 
-app = graph.compile()
+memory = MemorySaver()
+app = graph.compile(checkpointer=memory)
 # ===================== 调用测试 =====================
 if __name__ == "__main__":
-    # 初始化全局对话状态，存放完整历史消息
-    current_state = {
-        "messages": [],
-        "query": "",
-        "answer": ""
-    }
     print("对话已启动，输入「退出」结束对话\n")
+    # 固定会话线程ID，MemorySaver以此区分对话
+    config = {"configurable": {"thread_id": "user-123"}}
 
     while True:
         # 接收用户输入
@@ -370,16 +434,7 @@ if __name__ == "__main__":
         if user_input.strip() == "退出":
             print("对话结束")
             break
-
-        # 更新当前状态：写入本轮用户提问
-        current_state["query"] = user_input
-        current_state["messages"].append(HumanMessage(content=user_input))
-
         # 调用LangGraph执行流程
-        res = app.invoke(current_state)
-
+        res = app.invoke({"query":user_input},config=config)
         # 打印AI回复
         print(f"AI：{res['answer']}\n")
-
-        # 刷新状态，保留完整对话历史，供下一轮上下文使用
-        current_state = res
