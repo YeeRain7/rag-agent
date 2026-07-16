@@ -14,6 +14,10 @@ from langchain.tools import tool
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+# 混合检索器
+from langchain_community.retrievers import BM25Retriever
+from langchain_classic.retrievers import EnsembleRetriever
+from langchain_chroma import Chroma
 from openai import OpenAI
 
 # RAG 向量、重排相关导入
@@ -46,7 +50,6 @@ ds_client = OpenAI(
 # 2. 向量模型、重排模型全局加载
 embedding_model = SentenceTransformer("shibing624/text2vec-base-chinese")
 cross_encoder = CrossEncoder('cross-encoder/mmarco-mMiniLMv2-L12-H384-v1')
-
 
 #3.0文本清洗函数
 def clean_markdown(text: str) -> str:
@@ -108,7 +111,7 @@ def load_all_docs(folder_path: str):
         chunks = [c.strip() for c in chunks if c.strip()]
         # 加入全局列表
         all_chunks.extend(chunks)
-        print(f"已加载 {filename}，得到 {len(chunks)} 个语义片段")
+        # print(f"已加载 {filename}，得到 {len(chunks)} 个语义片段")
 
     # 全局去重
     all_chunks = list(dict.fromkeys(all_chunks))
@@ -119,15 +122,12 @@ def load_all_docs(folder_path: str):
 chromadb_client = chromadb.PersistentClient(path="./chroma_db_agent")
 chromadb_collection = chromadb_client.get_or_create_collection(name="default")
 
-#切片向量化函数
-def embed_chunk(chunk: str) -> list[float]:
-    embedding = embedding_model.encode(chunk)
-    return embedding.tolist()
+# 【修复】无论库空不空，先加载文本用于BM25
+chunks = load_all_docs("./knowledge_base")
 
 # 优化：判断集合是否为空，仅空库时才加载文档入库，避免重复插入
 if chromadb_collection.count() == 0:
     print("向量库为空，正在加载文档并持久化...")
-    chunks = load_all_docs("./knowledge_base")
     print(f"一共 {len(chunks)} 个片段，开始批量编码向量")
     # 批量向量化，比循环快很多
     embeddings = embedding_model.encode(chunks, batch_size=16).tolist()
@@ -147,6 +147,14 @@ if chromadb_collection.count() == 0:
     print("🎉 全部入库完成！")
 else:
     print(f"已加载持久化向量库，现有文档总数：{chromadb_collection.count()}")
+
+#切片向量化包装类（兼容 LangChain 的 embed_query / embed_documents 接口）
+class EmbedChunk:
+    def embed_query(self, text: str) -> list[float]:
+        return embedding_model.encode(text).tolist()
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return embedding_model.encode(texts).tolist()
 
 #意图识别函数--->余弦相似度
 def semantic_intent(query: str) -> str:
@@ -210,16 +218,35 @@ def llm_router(query: str) -> str:
         return "knowledge"
 
 # ===================== RAG 核心函数（仅检索+生成，无重复加载） =====================
+# ========== 全局只初始化一次！不要写进函数内部 ==========
+# 1. 向量库实例
+vector_store = Chroma(
+    client=chromadb_client,
+    collection_name="default",
+    embedding_function=EmbedChunk()
+)
+# 1. 向量检索器
+vector_retriever = vector_store.as_retriever(search_kwargs={"k": 15})
+
+# 2. BM25检索器，全局构建一次
+bm25_retriever = BM25Retriever.from_texts(chunks)
+bm25_retriever.k = 15
+
+# 3. 集成混合检索器
+ensemble_retriever = EnsembleRetriever(
+    retrievers=[vector_retriever, bm25_retriever],
+    weights=[0.5, 0.5]
+)
 def my_rag_chain(query: str):
     # 1. 向量召回
-    def retrieve(top_k: int = 15) -> List[str]:
-        query_embedding = embed_chunk(query)
-        results = chromadb_collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k
-        )
-        return results['documents'][0]
+    def retrieve() -> List[str]:
+        # 一次调用同时执行向量检索 + BM25关键词检索，自动融合结果
+        retrieved_docs = ensemble_retriever.invoke(query)
+        # retrieved_docs 是 Document 对象列表
+        retrieved_chunks = [doc.page_content for doc in retrieved_docs]
 
+        # 再拼接上下文送入LLM
+        return retrieved_chunks
     retrieved_chunks = retrieve()
 
     # 2. 重排
@@ -235,23 +262,20 @@ def my_rag_chain(query: str):
     reranked_chunks = rerank()
 
     # 3. LLM 生成回答
-    prompt = f"""请你作为一个知识助手，根据下面提供的【参考资料】回答用户的【问题】。
-如果资料里没有相关信息，直接说“资料中未提及相关内容”，生成与【问题】相关的准确内容。
-    硬性约束：
-    1. 收到问题后，必须围绕【用户最新一轮提问】执行;
-    2. 用户询问知识库相关技术问题，**必须优先调用search_my_knowledge工具检索和【用户原始问题】直接相关的资料**
-    3. 如果检索段落内容和用户问题无关，直接丢弃，绝对不能写入回答；
-    4. 禁止强行拼接无关文档内容；
-    5. 整理回答：基于知识库返回的结果，并整理成自然语言回复
-    6. 若没有有效相关资料，如实说明“知识库暂无相关内容”，不要编造、不要引用无关信息。
-    7. 禁止在未检索知识库的情况下，直接闲聊、反问用户；
+    if not reranked_chunks:
+        return "知识库暂无相关内容，请尝试换个问法或提供更多关键词。"
 
-【问题】
-{query}
-【参考资料】
-{"\n\n".join(reranked_chunks)}
-
-请基于上述内容作答，模仿人类的助手说话，语义清晰连贯，有适当分点，不要编造信息。"""
+    prompt = f"""你是一个知识助手。请严格根据下面的【参考资料】回答用户的【问题】。
+    如果资料中没有相关信息，直接说”资料中未提及相关内容”。
+    禁止编造任何信息，可以适当引入资料以外的与内容相关的自身训练数据进行补充。
+    
+    【问题】
+    {query}
+    
+    【参考资料】
+    {"\n\n".join(reranked_chunks)}
+    
+    请基于上述资料作答："""
 
     response = ds_client.chat.completions.create(
         model="deepseek-v4-flash",
@@ -302,12 +326,11 @@ def agent_node(state: ChatState):
         "search_hint":None
     }
 
+# 正确闲聊节点示例
 def chatbot_node(state: ChatState):
-    response = app.invoke({"messages":state["messages"]})
-    return {
-        "messages": [response],
-        "answer": response.content
-    }
+    prompt = SystemMessage(content="你是友好对话助手，正常闲聊")
+    resp = llm.invoke([prompt] + state["messages"])
+    return {"messages": [resp], "answer": resp.content}
 
 #路由节点----->混合路由仲裁
 def router(state:ChatState):
@@ -434,7 +457,12 @@ if __name__ == "__main__":
         if user_input.strip() == "退出":
             print("对话结束")
             break
-        # 调用LangGraph执行流程
-        res = app.invoke({"query":user_input},config=config)
+        # 调用LangGraph执行流程（同时写入query和HumanMessage）
+        res = app.invoke(
+            {
+                "query": user_input,
+                "messages": [HumanMessage(content=user_input)]},
+                config=config
+        )
         # 打印AI回复
         print(f"AI：{res['answer']}\n")
