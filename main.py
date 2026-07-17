@@ -1,3 +1,5 @@
+import os
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
 from langchain_core.messages import HumanMessage
 from agent_graph import app
 

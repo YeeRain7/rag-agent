@@ -1,32 +1,15 @@
 from langgraph.graph import StateGraph, END, MessagesState
 from langgraph.checkpoint.memory import MemorySaver
-from langchain.agents import create_agent
-from langchain.tools import tool
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, AIMessage
 
 from config import llm
-from rag_engine import my_rag_chain, semantic_intent, llm_router, CHAT_KW, KNOWLEDGE_KW
-
-
-# ===================== Tool 定义与 Agent 创建 =====================
-
-@tool
-def search_my_knowledge(query: str):
-    """搜索本地私有知识库，仅当用户问题需要查阅文档时调用此工具
-    Args:
-        query: 用户原始提问
-    """
-    return my_rag_chain(query)
-
-
-tools = [search_my_knowledge]
-
-# 创建标准工具Agent
-agent = create_agent(
-    model=llm,
-    tools=tools,
-    system_prompt="你是一个专业的知识助手，必须优先调用知识库工具回答用户问题，工具返回结果后整理成自然回答给用户，如果知识库没有该问题的相关内容，才利用自身训练数据回答",
+from rag_engine import (
+    my_rag_chain, my_rag_retrieve,
+    decompose_query, synthesize,
+    semantic_intent, llm_router,
+    CHAT_KW, KNOWLEDGE_KW
 )
+
 
 # ===================== 状态定义 =====================
 
@@ -34,29 +17,46 @@ class ChatState(MessagesState):
     query: str
     answer: str
     search_hint: str | None  # 仅用于本轮检索临时提示
+    sub_queries: list[str] | None  # 记录分解后的子问题
 
 
 # ===================== 图节点 =====================
 
 def agent_node(state: ChatState):
-    """核心Agent节点：调用LangChain Agent执行RAG查询"""
-    messages = state["messages"]
+    """核心Agent节点：判断复杂度 → 分解 → RRF检索 → 合成/生成"""
+    query = state["query"]
     search_hint = state.get("search_hint")
 
-    # 如果存在反思生成的检索优化词，追加提示给Agent
-    if search_hint:
-        hint_msg = SystemMessage(content=f"知识库检索优先使用关键词：{search_hint}")
-        invoke_messages = messages + [hint_msg]
-    else:
-        invoke_messages = messages
+    # 如果存在反思生成的检索优化词，拼入查询
+    effective_query = f"{search_hint} {query}" if search_hint else query
 
-    result = agent.invoke({"messages": invoke_messages})
-    final_msg = result["messages"][-1]
-    return {
-        "messages": [final_msg],
-        "answer": final_msg.content,
-        "search_hint": None
-    }
+    # Step 1: 判断问题复杂度，是否拆分子问题
+    decomp = decompose_query(effective_query)
+
+    if decomp.get("is_complex") and len(decomp.get("sub_queries", [])) > 1:
+        # 复杂问题：逐个子问题检索 → 收集 → 合成
+        sub_queries = decomp["sub_queries"]
+        all_chunks = []
+        for sq in sub_queries:
+            chunks = my_rag_retrieve(sq, top_n=5)
+            all_chunks.extend(chunks)
+
+        answer = synthesize(effective_query, sub_queries, all_chunks)
+        return {
+            "messages": [AIMessage(content=answer)],
+            "answer": answer,
+            "search_hint": None,
+            "sub_queries": sub_queries
+        }
+    else:
+        # 简单问题：单次 RRF + 重排 + 生成
+        answer = my_rag_chain(effective_query)
+        return {
+            "messages": [AIMessage(content=answer)],
+            "answer": answer,
+            "search_hint": None,
+            "sub_queries": None
+        }
 
 
 def chatbot_node(state: ChatState):

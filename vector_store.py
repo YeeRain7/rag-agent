@@ -1,7 +1,7 @@
 import chromadb
 from langchain_chroma import Chroma
 from langchain_community.retrievers import BM25Retriever
-from langchain_classic.retrievers import EnsembleRetriever
+
 
 from config import embedding_model, EmbedChunk
 from document_loader import load_all_docs
@@ -50,8 +50,4 @@ vector_retriever = vector_store.as_retriever(search_kwargs={"k": 15})
 bm25_retriever = BM25Retriever.from_texts(chunks)
 bm25_retriever.k = 15
 
-# 集成混合检索器
-ensemble_retriever = EnsembleRetriever(
-    retrievers=[vector_retriever, bm25_retriever],
-    weights=[0.5, 0.5]
-)
+# 检索器已就绪：vector_retriever + bm25_retriever 供 rag_engine 做 RRF 融合

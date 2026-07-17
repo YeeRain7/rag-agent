@@ -1,11 +1,12 @@
 import re
+import json
 from typing import List
 
 from langchain_core.messages import HumanMessage
 from sentence_transformers import util
 
 from config import llm, embedding_model, cross_encoder
-from vector_store import ensemble_retriever
+from vector_store import vector_retriever, bm25_retriever
 
 
 # ===================== 意图路由：关键词列表 =====================
@@ -85,33 +86,64 @@ def llm_router(query: str) -> str:
         return "knowledge"
 
 
+# ===================== RRF 融合检索 =====================
+
+def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int = 15) -> List[str]:
+    """
+    RRF (Reciprocal Rank Fusion) 融合多个检索器的排序结果
+
+    公式：RRF_score(d) = Σ 1/(k + rank_i(d))
+    rank_i(d) 从 1 开始计数
+
+    Args:
+        *doc_lists: 多个已排序的 Document 列表（每个按检索分数降序）
+        k: RRF 平滑常数，默认 60
+        top_n: 返回前 N 个 chunk 文本
+
+    Returns:
+        按 RRF score 降序排列的前 top_n 个 chunk 文本
+    """
+    rrf_scores = {}
+    for doc_list in doc_lists:
+        for rank, doc in enumerate(doc_list, start=1):
+            chunk = doc.page_content
+            rrf_scores[chunk] = rrf_scores.get(chunk, 0) + 1.0 / (k + rank)
+
+    # 按 RRF score 降序排列
+    sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+    return [chunk for chunk, _ in sorted_chunks[:top_n]]
+
+
+# ===================== 检索函数 =====================
+
+def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
+    """
+    纯检索（不生成）：向量检索 + BM25 → RRF 融合 → 返回 top_n chunks
+    用于子问题收集 chunk 场景
+    """
+    vector_docs = vector_retriever.invoke(query)
+    bm25_docs = bm25_retriever.invoke(query)
+    return reciprocal_rank_fusion(vector_docs, bm25_docs, k=60, top_n=top_n)
+
+
 # ===================== RAG 核心链路 =====================
 
 def my_rag_chain(query: str) -> str:
-    """完整RAG链路：混合检索 → 重排 → LLM生成"""
+    """完整RAG链路：RRF融合检索 → 重排 → LLM生成"""
 
-    # 1. 混合检索
-    def retrieve() -> List[str]:
-        # 一次调用同时执行向量检索 + BM25关键词检索，自动融合结果
-        retrieved_docs = ensemble_retriever.invoke(query)
-        return [doc.page_content for doc in retrieved_docs]
+    # 1. RRF 融合检索 → top 15
+    chunks = my_rag_retrieve(query, top_n=15)
 
-    retrieved_chunks = retrieve()
-
-    # 2. 重排
-    def rerank(top_k: int = 5) -> List[str]:
-        pairs = [(query, chunk) for chunk in retrieved_chunks]
-        scores = cross_encoder.predict(pairs)
-        chunk_with_score = list(zip(retrieved_chunks, scores))
-        chunk_with_score.sort(key=lambda x: x[1], reverse=True)
-        # 低分过滤
-        valid = [(c, s) for c, s in chunk_with_score if s > 0.25]
-        return [item[0] for item in valid[:top_k]]
-
-    reranked_chunks = rerank()
+    # 2. Cross-encoder 重排 → top 5
+    pairs = [(query, chunk) for chunk in chunks]
+    scores = cross_encoder.predict(pairs)
+    chunk_with_score = list(zip(chunks, scores))
+    chunk_with_score.sort(key=lambda x: x[1], reverse=True)
+    valid = [(c, s) for c, s in chunk_with_score if s > 0.25]
+    reranked = [c for c, s in valid[:5]]
 
     # 3. LLM 生成回答
-    if not reranked_chunks:
+    if not reranked:
         return "知识库暂无相关内容，请尝试换个问法或提供更多关键词。"
 
     prompt = f"""你是一个知识助手。请严格根据下面的【参考资料】回答用户的【问题】。
@@ -122,8 +154,100 @@ def my_rag_chain(query: str) -> str:
     {query}
 
     【参考资料】
-    {"\n\n".join(reranked_chunks)}
+    {"\n\n".join(reranked)}
 
     请基于上述资料作答："""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    return response.content
+
+
+# ===================== 问题分解 =====================
+
+def decompose_query(query: str) -> dict:
+    """
+    LLM 判断复杂度并分解子问题
+
+    Returns:
+        {"is_complex": False, "sub_queries": [原始问题]}
+        或 {"is_complex": True, "sub_queries": [子问题1, 子问题2, ...]}
+    """
+    prompt = f"""你是一个问题分析专家。判断以下问题是否需要拆分为多个子问题来分别检索回答。
+
+    规则：
+    1. 简单的事实查询、单一概念解释、单一操作步骤 → 不需要分解
+    2. 涉及对比、多个方面、多个步骤、因果关系等复杂问题 → 需要分解为2-4个子问题
+    3. 每个子问题应该是独立、简洁、可检索的查询语句
+    
+    用户问题：{query}
+    
+    请严格按以下JSON格式输出（不要输出任何其他内容，只输出JSON）：
+    不分解：{{"is_complex": false, "sub_queries": ["原始问题原文"]}}
+    需分解：{{"is_complex": true, "sub_queries": ["子问题1", "子问题2"]}}
+    最多拆4个子问题！
+"""
+    response = llm.invoke([HumanMessage(content=prompt)])
+    try:
+        # 尝试提取 JSON（防御 LLM 输出多余文字）
+        content = response.content.strip()
+        # 查找 JSON 部分
+        json_match = re.search(r'\{.*\}', content, re.DOTALL)
+        if json_match:
+            result = json.loads(json_match.group())
+            # 校验格式
+            if "sub_queries" in result and isinstance(result["sub_queries"], list):
+                result.setdefault("is_complex", len(result["sub_queries"]) > 1)
+                # 限制子问题数量
+                result["sub_queries"] = result["sub_queries"][:4]
+                return result
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+    # 解析失败，默认不分解
+    return {"is_complex": False, "sub_queries": [query]}
+
+
+# ===================== 合成答案 =====================
+
+def synthesize(original_query: str, sub_queries: list[str], all_chunks: list[str]) -> str:
+    """
+    汇总多个子问题的检索结果，用 LLM 合成最终答案
+
+    Args:
+        original_query: 用户原始问题
+        sub_queries: 分解后的子问题列表
+        all_chunks: 所有子问题检索收集的 chunk（可能重复）
+    """
+    # 去重（保持顺序）
+    all_chunks = list(dict.fromkeys(all_chunks))
+
+    # 用原始问题对所有 chunk 重排
+    if len(all_chunks) > 5:
+        pairs = [(original_query, chunk) for chunk in all_chunks]
+        scores = cross_encoder.predict(pairs)
+        chunk_with_score = list(zip(all_chunks, scores))
+        chunk_with_score.sort(key=lambda x: x[1], reverse=True)
+        valid = [(c, s) for c, s in chunk_with_score if s > 0.25]
+        all_chunks = [c for c, s in valid[:5]]
+
+    if not all_chunks:
+        return "知识库暂无相关内容，请尝试换个问法或提供更多关键词。"
+
+    # 用子问题列表作为上下文，帮助 LLM 理解分解意图
+    sub_query_lines = "\n".join(f"- {sq}" for sq in sub_queries)
+
+    prompt = f"""你是一个知识助手。用户提出了一个复杂问题，已拆分为以下子问题：
+{sub_query_lines}
+
+请严格根据下面的【参考资料】综合回答用户的原始【问题】。
+如果资料中没有相关信息，直接说"资料中未提及相关内容"。
+禁止编造任何信息。
+
+【原始问题】
+{original_query}
+
+【参考资料】
+{"\n\n".join(all_chunks)}
+
+请综合上述资料，结构清晰地作答："""
     response = llm.invoke([HumanMessage(content=prompt)])
     return response.content
