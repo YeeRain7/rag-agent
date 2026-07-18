@@ -1,4 +1,4 @@
-# Agent 系统设计文档
+# 基于LangGraph的自省式Rag-Agent 系统设计文档
 
 ## 1. 项目概述
 
@@ -29,7 +29,8 @@
 │                                                      │
 │   ┌──────────┐  ┌──────────┐  ┌─────────────────┐   │
 │   │  router  │  │agent_node│  │ reflection_node │   │
-│   │ 意图分流  │─▶│ 分解+检索 │─▶│   反思评估       │   │
+│   │ 意图分流  │─▶│ LLM Agent│─▶│   反思评估       │   │
+│   │          │  │ 自主决策  │  │                 │   │
 │   └──────────┘  └──────────┘  └─────────────────┘   │
 │        │              │               │              │
 │   ┌────▼────┐         │          ┌────▼────┐        │
@@ -46,15 +47,12 @@
 │                （业务逻辑层 / Service）                 │
 │                                                      │
 │   ┌─────────────────┐  ┌───────────────────┐        │
-│   │  意图路由函数      │  │   RAG 检索链路      │        │
-│   │  semantic_intent │  │  my_rag_chain      │        │
-│   │  llm_router      │  │  my_rag_retrieve   │        │
-│   │  CHAT_KW / KNOW_KW│ │  reciprocal_rank_   │        │
-│   └─────────────────┘  │  fusion (RRF)      │        │
-│                         │  decompose_query   │        │
-│   ┌─────────────────┐  │  synthesize         │        │
-│   │  问题分解 + 合成   │  └───────────────────┘        │
-│   └─────────────────┘                              │
+│   │  意图路由函数      │  │   检索 & 分解       │        │
+│   │  semantic_intent │  │  my_rag_retrieve   │        │
+│   │  llm_router      │  │  reciprocal_rank_   │        │
+│   │  CHAT_KW / KNOW_KW│ │  fusion (RRF)      │        │
+│   └─────────────────┘  │  decompose_query   │        │
+│                         └───────────────────┘        │
 └──────────────────────┬──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
@@ -91,9 +89,9 @@
 ```
 main.py
   ├── agent_graph.py
-  │     ├── config.py (llm)
+  │     ├── config.py (llm, cross_encoder)
   │     └── rag_engine.py
-  │           ├── config.py (llm, embedding_model, cross_encoder)
+  │           ├── config.py (llm, embedding_model)
   │           └── vector_store.py (vector_retriever, bm25_retriever)
   │                 ├── config.py (embedding_model, EmbedChunk)
   │                 └── document_loader.py (load_all_docs)
@@ -124,22 +122,23 @@ main.py
               │ _node   │  │ 直接LLM对话│
               └────┬────┘  └──────────┘
                    │
-          ┌────────▼────────┐
-          │ 问题复杂度判断     │  decompose_query()
-          │ 简单 or 复杂？    │
-          └───┬─────────┬───┘
-              │         │
-         简单  │         │ 复杂
-              │         │
-    ┌─────────▼──┐  ┌──▼──────────────┐
-    │my_rag_chain│  │ 逐子问题检索       │
-    │vector+BM25 │  │ for each sub_q:  │
-    │  → RRF 15  │  │   RRF → top 5   │
-    │  → rerank 5│  │ 合并去重 → rerank │
-    │  → generate│  │ synthesize 合成   │
-    └──────┬─────┘  └──────┬───────────┘
-           │               │
-           └───────┬───────┘
+         ┌─────────▼──────────┐
+         │ LangChain Agent     │
+         │ 自主决策工具调用      │
+         │                     │
+         │ 工具1: search_       │
+         │   knowledge(query)  │
+         │   → RRF + rerank    │
+         │   → 返回 top 5      │
+         │                     │
+         │ 工具2: decompose_    │
+         │   question(query)   │
+         │   → LLM 判断复杂度   │
+         │   → 返回子问题列表   │
+         │                     │
+         │ Agent 综合 chunks   │
+         │ 生成最终答案         │
+         └─────────┬──────────┘
                    │
             ┌──────▼──────┐
             │ reflection  │  评估回答质量
@@ -162,55 +161,44 @@ main.py
 | 参数 | 值 |
 |---|---|
 | RRF k | 60 |
-| RRF top_n（简单）| 15 |
-| RRF top_n（每子问题）| 5 |
+| RRF + rerank 输出 | top 5 chunks |
 | 重排 score 阈值 | > 0.25 |
-| 重排保留 | top 5 |
 | 反思重试上限 | 2 次 |
 | 子问题上限 | 4 个 |
 | 向量检索 k | 15 |
 | BM25 检索 k | 15 |
 | 分块大小/重叠 | 500 / 100 |
+| Agent 工具 | search_knowledge + decompose_question |
 
 ---
 
-## 5. 数据流（以复杂查询为例）
+## 5. 数据流（Agent 工具调用示例）
 
 ```
 用户: "RAG和微调有什么区别，各适用于什么场景？"
   │
   ▼
-router ──▶ 关键词命中 "区别"+"是什么" → 知识查询
+router ──▶ 关键词命中 "区别"+"是什么" → 路由到知识查询
   │
   ▼
-agent_node ──▶ decompose_query()
-  │               LLM 判断: is_complex=True
-  │               sub_queries: [
-  │                 "RAG技术原理与适用场景",
-  │                 "微调技术原理与适用场景",
-  │                 "RAG与微调的核心区别对比"
-  │               ]
+agent_node ──▶ invoke LangChain Agent
   │
-  ├── sub_q1 "RAG技术原理与适用场景"
-  │     ├── vector_retriever(15 docs) ─┐
-  │     ├── bm25_retriever(15 docs)  ─┤
-  │     │                               └── RRF(k=60) → top 5 chunks
+  ├─► [Agent 决策] 问题涉及对比 → 调用 decompose_question()
+  │     └─► LLM 分析: is_complex=True
+  │         返回: "1. RAG技术原理与适用场景
+  │                2. 微调技术原理与适用场景
+  │                3. RAG与微调的核心区别对比"
   │
-  ├── sub_q2 "微调技术原理与适用场景"
-  │     ├── vector_retriever(15 docs) ─┐
-  │     ├── bm25_retriever(15 docs)  ─┤
-  │     │                               └── RRF(k=60) → top 5 chunks
+  ├─► [Agent 决策] 逐子问题检索 → 调用 search_knowledge("RAG技术原理与适用场景")
+  │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
   │
-  ├── sub_q3 "RAG与微调的核心区别对比"
-  │     ├── vector_retriever(15 docs) ─┐
-  │     ├── bm25_retriever(15 docs)  ─┤
-  │     │                               └── RRF(k=60) → top 5 chunks
+  ├─► [Agent 决策] → 调用 search_knowledge("微调技术原理与适用场景")
+  │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
   │
-  ├── 收集 15 chunks → dict.fromkeys 去重
-  ├── cross_encoder.rerank(原始问题) → top 5
+  ├─► [Agent 决策] → 调用 search_knowledge("RAG与微调的核心区别对比")
+  │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
   │
-  ▼
-synthesize() ──▶ LLM 综合 5 chunks + 原始问题 + 子问题上下文
+  └─► [Agent 生成] 综合所有 15 个 chunks → 结构化回答
   │
   ▼
 reflection_node ──▶ 评估回答是否完整准确
@@ -227,7 +215,8 @@ reflection_node ──▶ 评估回答是否完整准确
 |---|---|---|
 | 检索融合 | RRF（非加权求和）| RRF 对排序位置敏感，不要求分数归一化，对异构检索器更鲁棒 |
 | 问题分解 | LLM 自动判断 | 避免硬编码规则，LLM 理解语义复杂度 |
-| Agent 模式 | 直接编排（非 LangChain Agent）| 减少一层 LLM 调用，流程更可控、更快 |
+| Agent 模式 | LangChain Agent 工具自主调用 | LLM 根据查询语义自主决定先分解还是直接搜索、搜几次、如何综合，比硬编码 if-else 更灵活 |
+| 容错降级 | 三层降级兜底 | Agent 失败 → 跳过分解直接检索+生成；检索失败 → 友好提示；确保单点故障不崩整个链路 |
 | 向量库 | ChromaDB 持久化 | 支持增量写入，sqlite3 零运维 |
 | 图编排 | LangGraph + MemorySaver | 状态持久化、条件分支、checkpoint 回溯 |
 | 模型 | DeepSeek V4 + text2vec-base-chinese | 中文场景优化，性价比高 |
@@ -235,26 +224,27 @@ reflection_node ──▶ 评估回答是否完整准确
 
 ---
 
-## 7. 检索链路对比
+## 7. 演进历程
 
-| 阶段 | V1（旧）| V2（当前）|
-|---|---|---|
-| 召回 | EnsembleRetriever 加权融合 | vector + BM25 独立检索 |
-| 融合 | 权重 [0.5, 0.5] | RRF (k=60) |
-| 候选数 | Ensemble 直接出 top 15 | RRF 融合 → top 15 |
-| 重排 | Cross-Encoder → top 5 | 不变 |
-| 分解 | 无 | LLM 自动判断 + 最多4子问题 |
-| 合成 | 无 | 多子问题 chunk 收集 → 去重 → 重排 → 合成 |
+| 阶段 | V1（加权融合）| V2（RRF+分解）| V3（Agent 模式）|
+|---|---|---|---|
+| 召回 | EnsembleRetriever | vector + BM25 独立 | 不变 |
+| 融合 | 权重 [0.5, 0.5] | RRF (k=60) | 不变 |
+| 分解 | 无 | 硬编码 if-else | LLM Agent 自主决策 |
+| 合成 | RAG 内置生成 | synthesize() | Agent 自主综合 |
+| 决策者 | 代码 | 代码 | **LLM Agent** |
+| 灵活性 | 低 | 中 | **高** — Agent 自行决定搜几次 |
+| 容错 | 无 | 无 | **三层降级** — Agent→检索→兜底 |
 
 ---
 
 ## 8. 文件清单
 
 ```
-D:\PythonProject\Agent_test\
+rag-agent/
 ├── main.py                # 入口：对话循环
 ├── agent_graph.py          # 编排层：LangGraph 节点 + 图组装
-├── rag_engine.py           # 业务层：RRF、RAG链路、问题分解、意图路由
+├── rag_engine.py           # 业务层：RRF 融合、检索、问题分解、意图路由
 ├── vector_store.py         # 基础设施：ChromaDB、vector/BM25 检索器
 ├── document_loader.py      # 基础设施：文档加载、清洗、分块
 ├── config.py               # 配置层：LLM、模型、环境变量

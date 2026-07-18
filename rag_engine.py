@@ -113,7 +113,6 @@ def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int = 15) -> List[str
     sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
     return [chunk for chunk, _ in sorted_chunks[:top_n]]
 
-
 # ===================== 检索函数 =====================
 
 def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
@@ -121,10 +120,13 @@ def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
     纯检索（不生成）：向量检索 + BM25 → RRF 融合 → 返回 top_n chunks
     用于子问题收集 chunk 场景
     """
-    vector_docs = vector_retriever.invoke(query)
-    bm25_docs = bm25_retriever.invoke(query)
-    return reciprocal_rank_fusion(vector_docs, bm25_docs, k=60, top_n=top_n)
-
+    try:
+        vector_docs = vector_retriever.invoke(query)
+        bm25_docs = bm25_retriever.invoke(query)
+        return reciprocal_rank_fusion(vector_docs, bm25_docs, k=60, top_n=top_n)
+    except Exception as e:
+        print(f"检索超时或失败: {e}")
+        return []
 
 # ===================== 问题分解 =====================
 
