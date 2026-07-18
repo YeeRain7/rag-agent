@@ -176,7 +176,7 @@ main.py
 ## 5. 数据流（Agent 工具调用示例）
 
 ```
-用户: "RAG和微调有什么区别，各适用于什么场景？"
+用户: "LangChain和LangGraph有什么区别，各适用于什么场景？"
   │
   ▼
 router ──▶ 关键词命中 "区别"+"是什么" → 路由到知识查询
@@ -186,17 +186,17 @@ agent_node ──▶ invoke LangChain Agent
   │
   ├─► [Agent 决策] 问题涉及对比 → 调用 decompose_question()
   │     └─► LLM 分析: is_complex=True
-  │         返回: "1. RAG技术原理与适用场景
-  │                2. 微调技术原理与适用场景
-  │                3. RAG与微调的核心区别对比"
+  │         返回: "1. LangChain技术原理与适用场景
+  │                2. LangGraph技术原理与适用场景
+  │                3. LangChain与LangGraph的核心区别对比"
   │
-  ├─► [Agent 决策] 逐子问题检索 → 调用 search_knowledge("RAG技术原理与适用场景")
+  ├─► [Agent 决策] 逐子问题检索 → 调用 search_knowledge(" LangChain技术原理与适用场景")
   │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
   │
-  ├─► [Agent 决策] → 调用 search_knowledge("微调技术原理与适用场景")
+  ├─► [Agent 决策] → 调用 search_knowledge("LangGraph技术原理与适用场景")
   │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
   │
-  ├─► [Agent 决策] → 调用 search_knowledge("RAG与微调的核心区别对比")
+  ├─► [Agent 决策] → 调用 search_knowledge("LangChain与LangGraph的核心区别对比")
   │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
   │
   └─► [Agent 生成] 综合所有 15 个 chunks → 结构化回答
