@@ -21,7 +21,9 @@ llm = ChatOpenAI(
     model="deepseek-v4-flash",
     api_key=os.getenv("api_key"),
     base_url="https://api.deepseek.com/v1",
-    temperature=0.2
+    temperature=0.2,
+    timeout=30,
+    max_retries=3
 )
 
 # 2. 向量模型、重排模型全局加载
