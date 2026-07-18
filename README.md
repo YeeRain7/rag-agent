@@ -1,4 +1,4 @@
-# 面向 AI 开发技术文档的 LangGraph 自省式混合召回 RAG 问答 Agent
+# 面向 AI 开发技术文档的 LangGraph 自主决策式自省 RAG Agent
 
 ---
 
