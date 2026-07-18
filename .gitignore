@@ -17,3 +17,6 @@ venv/
 
 #知识库文件
 knowledge_base/
+
+# 无关文件
+doc.md
