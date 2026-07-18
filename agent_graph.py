@@ -2,7 +2,7 @@ from langgraph.graph import StateGraph, END, MessagesState
 from langgraph.checkpoint.memory import MemorySaver
 from langchain.agents import create_agent
 from langchain.tools import tool
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, AIMessage
 
 from config import llm, cross_encoder
 from rag_engine import (
