@@ -1,13 +1,71 @@
 from langgraph.graph import StateGraph, END, MessagesState
 from langgraph.checkpoint.memory import MemorySaver
-from langchain_core.messages import SystemMessage, AIMessage
+from langchain.agents import create_agent
+from langchain.tools import tool
+from langchain_core.messages import SystemMessage
 
-from config import llm
+from config import llm, cross_encoder
 from rag_engine import (
-    my_rag_chain, my_rag_retrieve,
-    decompose_query, synthesize,
+    my_rag_retrieve,
+    decompose_query,
     semantic_intent, llm_router,
     CHAT_KW, KNOWLEDGE_KW
+)
+
+
+# ===================== Tool 定义 =====================
+
+@tool
+def search_knowledge_tool(query: str) -> str:
+    """搜索本地知识库。对每个（子）问题调用此工具获取相关文档片段。
+    返回经过RRF融合和Cross-Encoder重排后的top 5文档片段。
+    用法: search_knowledge("你要搜索的问题")"""
+    chunks = my_rag_retrieve(query, top_n=15)
+    if not chunks:
+        return "[未找到相关内容，请如实告知用户知识库暂无此信息]"
+
+    # Cross-Encoder 重排 → top 5
+    pairs = [(query, c) for c in chunks]
+    scores = cross_encoder.predict(pairs)
+    ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
+    top = [c for c, s in ranked if s > 0.25][:5]
+
+    if not top:
+        return "[未找到相关内容，请告知用户知识库暂无此信息]"
+
+    return "\n---\n".join(f"[来源{i}] {c}" for i, c in enumerate(top, 1))
+
+
+@tool
+def decompose_question_tool(question: str) -> str:
+    """判断问题复杂度并拆分。对于涉及对比、多个方面、多步骤的复杂问题，
+    拆分为2-4个独立的子问题。简单问题返回无需拆分。
+    用法: decompose_question("用户的问题")"""
+    result = decompose_query(question)
+    if result.get("is_complex") and len(result.get("sub_queries", [])) > 1:
+        lines = [f"{i}. {q}" for i, q in enumerate(result["sub_queries"], 1)]
+        return "拆分为以下子问题：\n" + "\n".join(lines)
+    return "该问题无需拆分，直接搜索即可。"
+
+
+# ===================== Agent 创建 =====================
+
+tools = [search_knowledge_tool, decompose_question_tool]
+
+agent = create_agent(
+    model=llm,
+    tools=tools,
+    system_prompt="""你是一个专业的知识助手，通过工具调用来回答用户问题。
+
+工具使用规则：
+1. 先判断问题类型：
+   - 涉及"对比"、"区别"、"优缺点"、"分别"、多个方面、多步骤推理 → 先调用 decompose_question 拆分
+   - 简单概念解释、单一事实查询 → 直接调用 search_knowledge
+2. 拆分后，对每个子问题分别调用 search_knowledge
+3. 综合所有检索到的文档片段，给出结构清晰、内容准确的回答
+4. 严格基于检索结果回答，检索不到的内容诚实告知用户
+5. 回答最后列出所引用的来源编号
+"""
 )
 
 
@@ -17,46 +75,30 @@ class ChatState(MessagesState):
     query: str
     answer: str
     search_hint: str | None  # 仅用于本轮检索临时提示
-    sub_queries: list[str] | None  # 记录分解后的子问题
+    sub_queries: list[str] | None  # 记录分解后的子问题（调试用）
 
 
 # ===================== 图节点 =====================
 
 def agent_node(state: ChatState):
-    """核心Agent节点：判断复杂度 → 分解 → RRF检索 → 合成/生成"""
-    query = state["query"]
+    """核心Agent节点：LLM自主决策工具调用（分解/搜索/合成）"""
+    messages = state["messages"]
     search_hint = state.get("search_hint")
 
-    # 如果存在反思生成的检索优化词，拼入查询
-    effective_query = f"{search_hint} {query}" if search_hint else query
-
-    # Step 1: 判断问题复杂度，是否拆分子问题
-    decomp = decompose_query(effective_query)
-
-    if decomp.get("is_complex") and len(decomp.get("sub_queries", [])) > 1:
-        # 复杂问题：逐个子问题检索 → 收集 → 合成
-        sub_queries = decomp["sub_queries"]
-        all_chunks = []
-        for sq in sub_queries:
-            chunks = my_rag_retrieve(sq, top_n=5)
-            all_chunks.extend(chunks)
-
-        answer = synthesize(effective_query, sub_queries, all_chunks)
-        return {
-            "messages": [AIMessage(content=answer)],
-            "answer": answer,
-            "search_hint": None,
-            "sub_queries": sub_queries
-        }
+    # 如果存在反思生成的检索优化词，注入Agent
+    if search_hint:
+        hint_msg = SystemMessage(content=f"检索优化提示：{search_hint}")
+        invoke_messages = [hint_msg] + list(messages)
     else:
-        # 简单问题：单次 RRF + 重排 + 生成
-        answer = my_rag_chain(effective_query)
-        return {
-            "messages": [AIMessage(content=answer)],
-            "answer": answer,
-            "search_hint": None,
-            "sub_queries": None
-        }
+        invoke_messages = messages
+
+    result = agent.invoke({"messages": invoke_messages})
+    final_msg = result["messages"][-1]
+    return {
+        "messages": [final_msg],
+        "answer": final_msg.content,
+        "search_hint": None
+    }
 
 
 def chatbot_node(state: ChatState):
