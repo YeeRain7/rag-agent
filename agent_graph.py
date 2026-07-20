@@ -36,7 +36,7 @@ def search_knowledge_tool(query: str) -> str:
         top = [c for c, s in ranked if s > 0.25][:5]
 
         if not top:
-            return "[未找到相关内容，请告知用户知识库暂无此信息]"
+            return "[未找到相关内容，请如实告知用户知识库暂无此信息]"
 
         return "\n---\n".join(f"[来源{i}] {c}" for i, c in enumerate(top, 1))
     except Exception as e:
@@ -66,7 +66,7 @@ agent = create_agent(
     tools=tools,
     system_prompt="""你是一个专业的知识助手，通过工具调用来回答用户问题。
 
-    工具使用规则：
+    强制要求与工具使用规则：
     1. 先判断问题类型：
        - 涉及"对比"、"区别"、"优缺点"、"分别"、多个方面、多步骤推理 → 先调用 decompose_question 拆分
        - 简单概念解释、单一事实查询 → 直接调用 search_knowledge
