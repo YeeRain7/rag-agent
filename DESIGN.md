@@ -1,4 +1,4 @@
-# 基于LangGraph的自省式Rag-Agent 系统设计文档
+# 面向可插拔 AI 开发私有知识库的 LangGraph 自主决策自省 RAG 问答 Agent
 
 ## 1. 项目概述
 
