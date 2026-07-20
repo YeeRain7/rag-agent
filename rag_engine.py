@@ -1,6 +1,6 @@
 import re
 import json
-from concurrent.futures import ThreadPoolExecutor,as_completed
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 from langchain_core.messages import HumanMessage
@@ -114,7 +114,7 @@ def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int = 15) -> List[str
     sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
     return [chunk for chunk, _ in sorted_chunks[:top_n]]
 # ===================== 向量加BM25并行函数=====================
-def parallel_vec_BM25_retriever(query:str, top_n: int):
+def parallel_vec_BM25_retriever(query:str):
     #定义独立检索任务
     def vec_task():
         return vector_retriever.invoke(query)
@@ -139,7 +139,7 @@ def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
     用于子问题收集 chunk 场景
     """
     try:
-        vec_docs, bm25_docs= parallel_vec_BM25_retriever(query, top_n=top_n)
+        vec_docs, bm25_docs= parallel_vec_BM25_retriever(query)
         return reciprocal_rank_fusion(vec_docs,bm25_docs, k=60, top_n=top_n)
     except Exception as e:
         print(f"检索超时或失败: {e}")
