@@ -2,7 +2,6 @@ import chromadb
 from langchain_chroma import Chroma
 from langchain_community.retrievers import BM25Retriever
 
-
 from config import embedding_model, EmbedChunk
 from document_loader import load_all_docs
 
@@ -34,7 +33,7 @@ if chromadb_collection.count() == 0:
         print(f"✅ 已写入 {min(end, total)} / {total}")
     print("🎉 全部入库完成！")
 else:
-    print(f"已加载持久化向量库，现有文档总数：{chromadb_collection.count()}")
+    print(f"\n已加载持久化向量库，现有文档总数：{chromadb_collection.count()}")
 
 # 4. 构建检索器
 vector_store = Chroma(
@@ -44,10 +43,9 @@ vector_store = Chroma(
 )
 
 # 向量检索器
-vector_retriever = vector_store.as_retriever(search_kwargs={"k": 15})
+vector_retriever = vector_store.as_retriever()
 
 # BM25检索器
 bm25_retriever = BM25Retriever.from_texts(chunks)
-bm25_retriever.k = 15
 
 # 检索器已就绪：vector_retriever + bm25_retriever 供 rag_engine 做 RRF 融合

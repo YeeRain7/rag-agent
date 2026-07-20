@@ -1,5 +1,6 @@
 import re
 import json
+from concurrent.futures import ThreadPoolExecutor,as_completed
 from typing import List
 
 from langchain_core.messages import HumanMessage
@@ -112,7 +113,24 @@ def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int = 15) -> List[str
     # 按 RRF score 降序排列
     sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
     return [chunk for chunk, _ in sorted_chunks[:top_n]]
+# ===================== 向量加BM25并行函数=====================
+def parallel_vec_BM25_retriever(query:str, top_n: int):
+    #定义独立检索任务
+    def vec_task():
+        return vector_retriever.invoke(query)
+    def bm25_task():
+        return bm25_retriever.invoke(query)
+    #开启线程池并发执行两个检索
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        #提交两个任务
+        futures_vec = executor.submit(vec_task)
+        futures_bm25 = executor.submit(bm25_task)
 
+        #设置阻塞获取两路结果
+        vec_docs = futures_vec.result()
+        bm25_docs = futures_bm25.result()
+
+    return vec_docs, bm25_docs
 # ===================== 检索函数 =====================
 
 def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
@@ -121,13 +139,11 @@ def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
     用于子问题收集 chunk 场景
     """
     try:
-        vector_docs = vector_retriever.invoke(query)
-        bm25_docs = bm25_retriever.invoke(query)
-        return reciprocal_rank_fusion(vector_docs, bm25_docs, k=60, top_n=top_n)
+        vec_docs, bm25_docs= parallel_vec_BM25_retriever(query, top_n=top_n)
+        return reciprocal_rank_fusion(vec_docs,bm25_docs, k=60, top_n=top_n)
     except Exception as e:
         print(f"检索超时或失败: {e}")
         return []
-
 # ===================== 问题分解 =====================
 
 def decompose_query(query: str) -> dict:
