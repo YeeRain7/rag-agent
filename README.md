@@ -1,4 +1,4 @@
-# 面向AI开发技术文档可插拔知识库的 LangGraph 自主决策式自省 RAG Agent
+# 面向可插拔 AI 开发私有知识库的 LangGraph 自主决策自省 RAG 问答 Agent
 
 ---
 
