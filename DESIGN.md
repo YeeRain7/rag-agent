@@ -2,7 +2,7 @@
 
 ## 1. 项目概述
 
-**名称**：面向 AI 开发技术文档的 LangGraph 自主决策式自省 RAG Agent
+**名称**：面向AI开发技术文档可插拔知识库的 LangGraph 自主决策式自省 RAG Agent
 
 **核心能力**：
 
@@ -12,6 +12,7 @@
 - Cross-Encoder 精排
 - 反思自纠错重试机制
 - 多轮对话记忆持久化
+- 可插拔知识库：代码与领域零耦合，替换文档即切换知识库领域，无需修改任何业务逻辑
 
 ---
 
@@ -69,6 +70,7 @@
 │   ┌────────────┐  ┌────────────┐  ┌──────────────┐  │
 │   │ load_all_  │  │clean_mark- │  │ load_pdf     │  │
 │   │ docs       │  │down        │  │ (PyMuPDF)    │  │
+│   │ (并行IO)    │  │            │  │              │  │
 │   └────────────┘  └────────────┘  └──────────────┘  │
 └──────────────────────┬──────────────────────────────┘
                        │
@@ -169,6 +171,8 @@ main.py
 | 向量检索 k | 15 |
 | BM25 检索 k | 15 |
 | 分块大小/重叠 | 500 / 100 |
+| vec+BM25 并行召回 | ThreadPoolExecutor, max_workers=2 |
+| 文档并行加载 | ThreadPoolExecutor, max_workers=4 |
 | Agent 工具 | search_knowledge + decompose_question |
 
 ---
@@ -191,13 +195,13 @@ agent_node ──▶ invoke LangChain Agent
   │                3. LangChain与LangGraph的核心区别对比"
   │
   ├─► [Agent 决策] 逐子问题检索 → 调用 search_knowledge(" LangChain技术原理与适用场景")
-  │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
+  │     └─► vector(15) ∥ BM25(15)（并行）→ RRF(k=60) → Cross-Encoder → top 5 chunks
   │
   ├─► [Agent 决策] → 调用 search_knowledge("LangGraph技术原理与适用场景")
-  │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
+  │     └─► vector(15) ∥ BM25(15)（并行）→ RRF(k=60) → Cross-Encoder → top 5 chunks
   │
   ├─► [Agent 决策] → 调用 search_knowledge("LangChain与LangGraph的核心区别对比")
-  │     └─► vector(15)+BM25(15) → RRF(k=60) → Cross-Encoder → top 5 chunks
+  │     └─► vector(15) ∥ BM25(15)（并行）→ RRF(k=60) → Cross-Encoder → top 5 chunks
   │
   └─► [Agent 生成] 综合所有 15 个 chunks → 结构化回答
   │
@@ -222,20 +226,23 @@ reflection_node ──▶ 评估回答是否完整准确
 | 图编排 | LangGraph + MemorySaver | 状态持久化、条件分支、checkpoint 回溯 |
 | 模型 | DeepSeek V4 + text2vec-base-chinese | 中文场景优化，性价比高 |
 | 反思 | Post-hoc 评估 + 关键词优化重试 | 简单有效，比复杂 self-correct 节省 token |
+| I/O 并行化 | ThreadPoolExecutor 并行召回 + 并行文档加载 | 向量检索与 BM25 互不依赖，多文档读取互不依赖，并行化可显著降低 I/O 等待延迟 |
+| 可插拔知识库 | 代码与领域完全解耦，`knowledge_base/` 目录热插拔 | 替换文档即可切换至法律、医学、金融等任意领域，无需修改任何代码逻辑 |
 
 ---
 
 ## 7. 演进历程
 
-| 阶段 | V1（加权融合）| V2（RRF+分解）| V3（Agent 模式）|
-|---|---|---|---|
-| 召回 | EnsembleRetriever | vector + BM25 独立 | 不变 |
-| 融合 | 权重 [0.5, 0.5] | RRF (k=60) | 不变 |
-| 分解 | 无 | 硬编码 if-else | LLM Agent 自主决策 |
-| 合成 | RAG 内置生成 | synthesize() | Agent 自主综合 |
-| 决策者 | 代码 | 代码 | **LLM Agent** |
-| 灵活性 | 低 | 中 | **高** — Agent 自行决定搜几次 |
-| 容错 | 无 | 无 | **三层降级** — Agent→检索→兜底 |
+| 阶段 | V1（加权融合）| V2（RRF+分解）| V3（Agent 模式）| V4（并行化）|
+|---|---|---|---|---|
+| 召回 | EnsembleRetriever | vector + BM25 独立 | vector + BM25 独立 | **ThreadPoolExecutor 并行** |
+| 融合 | 权重 [0.5, 0.5] | RRF (k=60) | RRF (k=60) | RRF (k=60) |
+| 分解 | 无 | 硬编码 if-else | LLM Agent 自主决策 | LLM Agent 自主决策 |
+| 合成 | RAG 内置生成 | synthesize() | Agent 自主综合 | Agent 自主综合 |
+| 决策者 | 代码 | 代码 | **LLM Agent** | LLM Agent |
+| 文档加载 | 串行 | 串行 | 串行 | **ThreadPoolExecutor 并行** |
+| 灵活性 | 低 | 中 | **高** — Agent 自行决定搜几次 | 高 — Agent 自行决定搜几次 |
+| 容错 | 无 | 无 | **三层降级** — Agent→检索→兜底 | 三层降级 — Agent→检索→兜底 |
 
 ---
 

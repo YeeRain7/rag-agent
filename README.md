@@ -1,4 +1,4 @@
-# 面向 AI 开发技术文档的 LangGraph 自主决策式自省 RAG Agent
+# 面向AI开发技术文档可插拔知识库的 LangGraph 自主决策式自省 RAG Agent
 
 ---
 
@@ -10,16 +10,18 @@
 | **Agent 自主决策** | 给 LLM 两个工具（`search_knowledge` + `decompose_question`），Agent 自主决定先分解还是直接搜索、搜几次、如何综合 | 展示了真正的 Agent 模式——LLM 自主规划工具调用序列，而非硬编码 if-else 流程 |
 | **问题分解** | LLM 自动判断查询复杂度，复杂问题拆分为 2-4 个子问题分别检索 | 将单步检索泛化为多步检索 pipeline，Agent 可根据内容灵活调整检索策略 |
 | **反思自纠错** | 生成后评估回答质量，不合格时自动优化检索词并重试（最多 2 次）| 引入 Self-Reflection 闭环，在不增加外部监督的情况下提升答案可靠性 |
-| **代码工程化** | 从 453 行单文件重构为 6 模块分层架构（配置层→基础设施层→业务层→编排层→入口层）| 展示了模块解耦、单向依赖、接口设计的能力 |
+| **代码工程化** | 从 650 行单文件重构为 6 模块分层架构（配置层→基础设施层→业务层→编排层→入口层） | 展示了模块解耦、单向依赖、接口设计的能力 |
 | **容错降级** | Agent 调用失败自动降级为直接检索+生成，检索失败返回友好提示——三层兜底，单点故障不崩链路 | 体现了生产级系统的健壮性设计思维 |
+| **可插拔知识库** | 代码与领域零耦合，`knowledge_base/` 目录热插拔，替换文档即切换至任意领域 | 系统设计不绑定特定领域，体现通用工具思维而非一次性作业 |
 
 ## 系统指标 / Metrics
 
 | 指标 | 数值 |
 |---|---|
-| 知识库文档 | 6 篇（MD + PDF），覆盖 NLP / RAG / Transformer / LangChain / AI Agent |
-| 文本片段 | 2,564 chunks（chunk_size=500, overlap=100） |
-| 检索延迟 | 向量 + BM25 双路并行召回 < 1s，Cross-Encoder 重排 < 200ms |
+| 知识库文档 | 当前 6 篇（MD + PDF），当前覆盖 AI 开发技术文档（可替换为任意领域） |
+| 文本片段 | 当前 2,564 chunks（chunk_size=500, overlap=100） |
+| 检索延迟 | 向量 ∥ BM25 双路并行召回 < 1s（ThreadPoolExecutor），Cross-Encoder 重排 < 200ms |
+| 文档加载 | 多文件并行IO加载（ThreadPoolExecutor, max_workers=4），6 篇文档 < 5s |
 | 重试机制 | 最多 2 次反思重试，每次生成优化检索词 |
 | 代码规模 | 6 模块、~400 行核心逻辑、零循环依赖 |
 
@@ -34,7 +36,7 @@ Query
   ├─► Agent Node（LLM Agent 自主决策）
   │     ┌─────────────────────────────────────┐
   │     │ 工具1: search_knowledge(query)       │
-  │     │   → vector(15) + BM25(15)            │
+  │     │   → vector(15) ∥ BM25(15)（并行）            │
   │     │   → RRF(k=60) → Cross-Encoder → top 5│
   │     │                                      │
   │     │ 工具2: decompose_question(query)     │
@@ -92,8 +94,8 @@ Query
              │
 业务层:     rag_engine.py       RRF · my_rag_retrieve · decompose_query
              │
-基础设施:   vector_store.py     ChromaDB · Vector Retriever · BM25 Retriever
-             document_loader.py  PDF/MD 解析 · Markdown清洗 · 中文分块
+基础设施:   vector_store.py     ChromaDB · Vector Retriever ∥ BM25 Retriever（并行）
+             document_loader.py  PDF/MD 解析 · Markdown清洗 · 中文分块（多文件并行IO）
              │
 配置层:     config.py           LLM · Embedding · Cross-Encoder · 环境变量
 ```
@@ -110,11 +112,11 @@ Query
         → 返回 3 个子问题
 
 [Agent] 调用 search_knowledge("LangChain技术原理与适用场景")
-        → vector+BM25 → RRF → Cross-Encoder → top 5  ✓
+        → vector∥BM25（并行）→ RRF → Cross-Encoder → top 5  ✓
 [Agent] 调用 search_knowledge("LangGraph技术原理与适用场景")
-        → vector+BM25 → RRF → Cross-Encoder → top 5  ✓
+        → vector∥BM25（并行）→ RRF → Cross-Encoder → top 5  ✓
 [Agent] 调用 search_knowledge("LangChain与LangGraph核心区别")
-        → vector+BM25 → RRF → Cross-Encoder → top 5  ✓
+        → vector∥BM25（并行）→ RRF → Cross-Encoder → top 5  ✓
 
 [Agent] 综合 15 chunks → 生成结构化对比回答
 
