@@ -43,9 +43,9 @@ vector_store = Chroma(
 )
 
 # 向量检索器
-vector_retriever = vector_store.as_retriever(search_kwargs={"k": 15})
+vector_retriever = vector_store.as_retriever(search_kwargs={"k": 10})
 
 # BM25检索器
-bm25_retriever = BM25Retriever.from_texts(chunks,k=15)
+bm25_retriever = BM25Retriever.from_texts(chunks,k=20)
 
 # 检索器已就绪：vector_retriever + bm25_retriever 供 rag_engine 做 RRF 融合
