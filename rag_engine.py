@@ -2,6 +2,7 @@ import re
 import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
+import numpy as np
 
 from langchain_core.messages import HumanMessage
 from sentence_transformers import util
@@ -86,10 +87,36 @@ def llm_router(query: str) -> str:
         # 无法识别默认走知识库查询，避免漏召回
         return "knowledge"
 
+# ===================== 语义相似度去重 =====================
+def deduplicate_semantic(sorted_text_score_list,threshold=0.85):
+    """
+    依赖 embedding 计算相似度，仅保留排序靠前的高优先级片段：
+    sorted_text_score_list: [(文本, rrf分数)] 已降序
+    threshold: 相似度阈值，超过判定为冗余重复
+    return: 去重后保持原有高分顺序的列表
+    """
+    keep_list = []
+    keep_embeddings = []
+    for text,score in sorted_text_score_list:
+        #文本编码，归一化
+        vec = embedding_model.encode( text, normalize_embeddings=True)
+        duplicate = False
 
+        # 和已经保留的高优先级文本逐一比对
+        for save_vec in keep_embeddings:
+            sim = np.dot(vec, save_vec)
+            if sim > threshold:
+                duplicate = True
+                break
+
+        if not duplicate:
+            keep_list.append((text,score))
+            keep_embeddings.append(vec)
+
+    return keep_list
 # ===================== RRF 融合检索 =====================
 
-def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int = 15) -> List[str]:
+def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int) -> List[str]:
     """
     RRF (Reciprocal Rank Fusion) 融合多个检索器的排序结果
 
@@ -112,7 +139,11 @@ def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int = 15) -> List[str
 
     # 按 RRF score 降序排列
     sorted_chunks = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-    return [chunk for chunk, _ in sorted_chunks[:top_n]]
+
+    # embedding 去重后返回top_N
+    dedup_semantic_list = deduplicate_semantic(sorted_chunks)
+
+    return [chunk for chunk, _ in dedup_semantic_list[:top_n]]
 # ===================== 向量加BM25并行函数=====================
 def parallel_vec_BM25_retriever(query:str):
     #定义独立检索任务
@@ -135,7 +166,7 @@ def parallel_vec_BM25_retriever(query:str):
 
 def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
     """
-    纯检索（不生成）：向量检索 + BM25 → RRF 融合 → 返回 top_n chunks
+    纯检索（不生成）：向量检索 + BM25 → RRF 融合 +向量去重→ 返回 top_n chunks
     用于子问题收集 chunk 场景
     """
     try:
