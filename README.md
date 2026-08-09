@@ -1,6 +1,6 @@
 # RAG 智能问答系统 — FastAPI + Vue 3 Web 版
 
-> 基于可插拔策略架构的 RAG 智能问答系统。LangGraph 编排 + ChromaDB 向量检索 + RRF 多路融合，带黑白灰毛玻璃科技风的 Web 交互界面。
+> 基于可插拔策略架构的 RAG 智能问答系统。LangGraph 编排 + ChromaDB 向量检索 + RRF 多路融合，黑白灰+毛玻璃风格的 Web 交互界面。
 
 ![architecture](https://img.shields.io/badge/backend-FastAPI-009688) ![frontend](https://img.shields.io/badge/frontend-Vue3%20%2B%20TS-42b883) ![rag](https://img.shields.io/badge/RAG-LangGraph%20%2B%20ChromaDB-4f46e5)
 
