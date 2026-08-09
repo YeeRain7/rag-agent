@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor,as_completed
 
 import fitz  # PyMuPDF
 
-from config import text_splitter
+from .config import text_splitter
 
 
 def clean_markdown(text: str) -> str:
@@ -36,6 +36,13 @@ def load_pdf(filepath: str) -> str:
     return text
 
 
+def load_docx(filepath: str) -> str:
+    """从 DOCX 中提取纯文本（段落）"""
+    from docx import Document
+    doc = Document(filepath)
+    return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+
+
 def load_single_file(file_path: str) -> list[str]:
     """加载文件夹中所有支持的文档，清洗、分块、去重"""
     try:
@@ -47,6 +54,8 @@ def load_single_file(file_path: str) -> list[str]:
                 raw_text = f.read()
         elif filename.endswith(".pdf"):
             raw_text = load_pdf(file_path)
+        elif filename.endswith(".docx"):
+            raw_text = load_docx(file_path)
         else:
             return []
         # 1. 清洗markdown标记
@@ -63,23 +72,59 @@ def load_single_file(file_path: str) -> list[str]:
 
 def load_all_docs(folder_path: str, max_workers: int = 4) -> list[str]:
     """并行加载文件夹中所有支持的文档，清洗、分块、去重"""
-    # 第一步：收集全部合法文件路径
-    file_paths=[]
+    file_paths = []
     for filename in os.listdir(folder_path):
         filepath = os.path.join(folder_path, filename)
-        if filepath.endswith((".md", ".txt", ".pdf")):
+        if filepath.endswith((".md", ".txt", ".pdf", ".docx")):
             file_paths.append(filepath)
 
     all_chunks = []
-    # 线程池并发读取所有文件
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有文件读取任务
         task_futures = [executor.submit(load_single_file, fp) for fp in file_paths]
-        #逐个收集结果
         for future in as_completed(task_futures):
-            file_chunks = future.result()
-            all_chunks.extend(file_chunks)
-    # 全局去重
+            all_chunks.extend(future.result())
     all_chunks = list(dict.fromkeys(all_chunks))
     print(f"总计加载 {len(all_chunks)} 个有效片段")
     return all_chunks
+
+
+def load_all_docs_with_meta(folder_path: str, max_workers: int = 4):
+    """
+    并行加载并返回结构化数据：chunks 文本 + 每块的来源元数据。
+    Returns: (chunks: list[str], metadatas: list[dict])
+      每个 metadata: {source: 文件名, type: pdf|md|txt}
+    """
+    file_paths = []
+    for filename in os.listdir(folder_path):
+        filepath = os.path.join(folder_path, filename)
+        if filepath.endswith((".md", ".txt", ".pdf", ".docx")):
+            file_paths.append(filepath)
+
+    source_name_map = {}  # fp → basename
+    for fp in file_paths:
+        source_name_map[fp] = os.path.basename(fp)
+
+    def _load_with_source(fp):
+        chunks = load_single_file(fp)
+        src = source_name_map[fp]
+        ext = os.path.splitext(src)[1].lower()
+        doc_type = {".pdf": "PDF", ".md": "Markdown", ".txt": "TXT", ".docx": "Word"}.get(ext, ext)
+        metas = [{"source": src, "type": doc_type} for _ in chunks]
+        return chunks, metas
+
+    all_chunks = []
+    all_metas = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_load_with_source, fp): fp for fp in file_paths}
+        for future in as_completed(futures):
+            chunks, metas = future.result()
+            # 去重
+            seen = set(all_chunks)
+            for c, m in zip(chunks, metas):
+                if c not in seen:
+                    seen.add(c)
+                    all_chunks.append(c)
+                    all_metas.append(m)
+
+    print(f"总计加载 {len(all_chunks)} 个有效片段（含元数据）")
+    return all_chunks, all_metas

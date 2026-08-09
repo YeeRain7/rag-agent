@@ -1,0 +1,96 @@
+/* ============================================
+   Design Tokens — Light Editorial Theme
+   参照 GPT/DeepSeek: 白底 + 浅灰侧栏，黑白灰主色
+   ============================================ */
+
+:root {
+  /* === 页面底色 === */
+  --bg-page: #ffffff;
+  --bg-sidebar: #f5f5f7;
+  --bg-chat: #ffffff;
+  --bg-hover: #f0f0f3;
+  --bg-active: #e8e8ed;
+
+  /* === 毛玻璃（仅输入框/弹窗保留） === */
+  --glass-bg: rgba(255, 255, 255, 0.80);
+  --glass-border: rgba(0, 0, 0, 0.08);
+
+  /* === 边框 === */
+  --border-subtle: #eaeaed;
+  --border-card: #e0e0e5;
+  --border-active: #c8c8d0;
+  --border-focus: #6b6b78;
+  --border-sidebar: #e5e5ea;
+
+  /* === 文字 === */
+  --text-primary: #1a1a24;
+  --text-secondary: #6b6b78;
+  --text-tertiary: #9a9aa8;
+  --text-placeholder: #b0b0ba;
+
+  /* === 强调色 === */
+  --accent: #4f4f5e;
+  --accent-hover: #2a2a35;
+  --accent-dim: rgba(0, 0, 0, 0.06);
+
+  /* === 阴影 === */
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.10);
+
+  /* === 圆角 === */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+
+  /* === 间距 === */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* === 字体 === */
+  --font-heading: "Space Grotesk", "PingFang SC", -apple-system, sans-serif;
+  --font-body: "Open Sans", "PingFang SC", -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+
+  /* === 过渡 === */
+  --transition-fast: 150ms ease-out;
+  --transition-normal: 250ms ease-out;
+}
+
+/* ============================================
+   暗色主题
+   ============================================ */
+[data-theme="dark"] {
+  --bg-page: #0d0d14;
+  --bg-sidebar: #13131a;
+  --bg-chat: #0d0d14;
+  --bg-hover: #1e1e28;
+  --bg-active: #2a2a36;
+
+  --glass-bg: rgba(20, 20, 30, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.06);
+
+  --border-subtle: #1e1e28;
+  --border-card: #282830;
+  --border-active: #3a3a45;
+  --border-focus: #6b6b78;
+  --border-sidebar: #1a1a22;
+
+  --text-primary: #e4e4f0;
+  --text-secondary: #8e8e9a;
+  --text-tertiary: #5e5e6a;
+  --text-placeholder: #4e4e58;
+
+  --accent: #7a7a8a;
+  --accent-hover: #a0a0b0;
+  --accent-dim: rgba(255, 255, 255, 0.06);
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.30);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.40);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.50);
+}

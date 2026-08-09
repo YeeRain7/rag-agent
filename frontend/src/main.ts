@@ -1,0 +1,10 @@
+import { createApp } from 'vue'
+import App from './App.vue'
+import router from './router'
+import './style.css'
+import './styles/tokens.css'
+import './styles/glass.css'
+
+const app = createApp(App)
+app.use(router)
+app.mount('#app')

@@ -4,9 +4,10 @@ from langchain.agents import create_agent
 from langchain.tools import tool
 from langchain_core.messages import SystemMessage, AIMessage
 
-from config import llm, cross_encoder
-from rag_engine import (
+from .config import llm, cross_encoder
+from .rag_engine import (
     my_rag_retrieve,
+    my_rag_retrieve_with_meta,
     decompose_query,
     semantic_intent, llm_router,
     CHAT_KW, KNOWLEDGE_KW
@@ -21,29 +22,41 @@ import traceback
 def search_knowledge_tool(query: str) -> str:
     """
     搜索本地知识库。对每个（子）问题调用此工具获取相关文档片段。
-    返回经过RRF融合和Cross-Encoder重排后的top 5文档片段。
+    返回经过RRF融合和Cross-Encoder重排后的top 5文档片段，每条带文档来源。
     用法: search_knowledge("你要搜索的问题")
     """
     try:
-        chunks = my_rag_retrieve(query, top_n=15)
-        if not chunks:
-            return "[未找到相关内容，请如实告知用户知识库暂无此信息]"
+        chunks_with_meta = my_rag_retrieve_with_meta(query, top_n=15)
+        if not chunks_with_meta:
+            return "[未找到相关内容]"
 
-        # Cross-Encoder 重排 → top 5
-        pairs = [(query, c) for c in chunks]
+        # Cross-Encoder 重排
+        chunk_texts = [c["text"] for c in chunks_with_meta]
+        pairs = [(query, t) for t in chunk_texts]
         scores = cross_encoder.predict(pairs)
-        ranked = sorted(zip(chunks, scores), key=lambda x: x[1], reverse=True)
-        top = [c for c, s in ranked if s > 0.25][:5]
+        ranked = sorted(zip(chunks_with_meta, scores), key=lambda x: x[1], reverse=True)
+        top = [(c, s) for c, s in ranked if s > 0.25][:5]
 
         if not top:
-            return "[未找到相关内容，请如实告知用户知识库暂无此信息]"
+            return "[未找到相关内容]"
 
-        return "\n---\n".join(f"[来源{i}] {c}" for i, c in enumerate(top, 1))
+        lines = []
+        for i, (chunk, score) in enumerate(top, 1):
+            confidence = f" (置信度: {score:.2f})" if score < 0.6 else ""
+            lines.append(
+                f"[来源{i}] 文档: {chunk['source']} | 类型: {chunk['type']}{confidence}\n"
+                f"原文: {chunk['text'][:300]}"
+            )
+        return "\n---\n".join(lines)
     except Exception as e:
         print(f"[search_knowledge] 异常: {e}")
-        # 重排失败时降级：返回不带分数的原始 RRF 结果
-        fallback = chunks if chunks else ["[检索失败，请稍后重试]"]
-        return "\n---\n".join(f"[来源{i}] {c}" for i, c in enumerate(fallback[:5], 1))
+        try:
+            fallback = my_rag_retrieve(query, top_n=5)
+            if fallback:
+                return "\n---\n".join(f"[来源{i}] {c[:200]}" for i, c in enumerate(fallback, 1))
+        except Exception:
+            pass
+        return "[检索失败，请稍后重试]"
 
 @tool
 def decompose_question_tool(question: str) -> str:
@@ -64,16 +77,27 @@ tools = [search_knowledge_tool, decompose_question_tool]
 agent = create_agent(
     model=llm,
     tools=tools,
-    system_prompt="""你是一个专业的知识助手，通过工具调用来回答用户问题。
+    system_prompt="""你是专业的知识助手，通过工具调用回答用户问题。
 
-    强制要求与工具使用规则：
-    1. 先判断问题类型：
-       - 涉及"对比"、"区别"、"优缺点"、"分别"、多个方面、多步骤推理 → 先调用 decompose_question 拆分
-       - 简单概念解释、单一事实查询 → 直接调用 search_knowledge
-    2. 拆分后，对每个子问题分别调用 search_knowledge
-    3. 综合所有检索到的文档片段，给出结构清晰、内容准确的回答
-    4. 严格基于检索结果回答，检索不到的内容诚实告知用户
-    5. 回答最后列出所引用的来源编号
+## 工具使用规则
+1. 先判断问题类型：
+   - 涉及"对比"、"区别"、"优缺点"、多个方面 → 先调用 decompose_question 拆分
+   - 简单概念解释、单一事实查询 → 直接调用 search_knowledge
+2. 拆分后，对每个子问题分别调用 search_knowledge
+
+## 引用格式规范
+1. 正文中引用检索内容时，使用上角标标注 [^1] [^2] 等
+2. 如果某段内容来自模型推理而非知识库，在段前加 「推理补充」标记
+3. 检索工具返回的每条来源都包含文档名称和类型，引用时必须体现
+4. 同一文档的多个片段去重合并，优先引用置信度高的
+5. 检索不到内容时，明确告知用户："知识库中暂未找到相关信息"
+
+## 回答末尾格式（必须）
+---
+**参考来源：**
+[^1] 文档名：xxx | 类型：PDF/Markdown | 原文片段："..."
+[^2] 文档名：xxx | 类型：PDF/Markdown | 原文片段："..."
+（如无知识库引用则写"本回答基于模型知识，未引用内部文档"）
     """
 )
 
@@ -222,30 +246,39 @@ def should_retry(state: ChatState):
 
 # ===================== 图构建 =====================
 
-graph = StateGraph(ChatState)
-graph.add_node("agent", agent_node)
-graph.add_node("router", router)
-graph.add_node("chatbot", chatbot_node)
-graph.add_node("reflection", reflection_node)
+def build_graph():
+    """
+    构建并编译 LangGraph StateGraph。
+    由 FastAPI startup 事件调用，返回编译后的 app 作为全局单例。
+    """
+    graph = StateGraph(ChatState)
+    graph.add_node("agent", agent_node)
+    graph.add_node("router", router)
+    graph.add_node("chatbot", chatbot_node)
+    graph.add_node("reflection", reflection_node)
 
-graph.add_conditional_edges(
-    "__start__",
-    router,
-    {
-        "agent_node": "agent",
-        "chatbot_node": "chatbot"
-    }
-)
-graph.add_edge("agent", "reflection")
-graph.add_conditional_edges(
-    "reflection",
-    should_retry,
-    {
-        "agent_node": "agent",
-        END: END
-    }
-)
-graph.add_edge("chatbot", END)
+    graph.add_conditional_edges(
+        "__start__",
+        router,
+        {
+            "agent_node": "agent",
+            "chatbot_node": "chatbot"
+        }
+    )
+    graph.add_edge("agent", "reflection")
+    graph.add_conditional_edges(
+        "reflection",
+        should_retry,
+        {
+            "agent_node": "agent",
+            END: END
+        }
+    )
+    graph.add_edge("chatbot", END)
 
-memory = MemorySaver()
-app = graph.compile(checkpointer=memory)
+    memory = MemorySaver()
+    return graph.compile(checkpointer=memory)
+
+
+# 模块级变量：延迟初始化，由 core/__init__.py 的 init() 设置
+app = None

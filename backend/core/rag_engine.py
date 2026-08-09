@@ -7,8 +7,17 @@ import numpy as np
 from langchain_core.messages import HumanMessage
 from sentence_transformers import util
 
-from config import llm, embedding_model
-from vector_store import vector_retriever, bm25_retriever
+from .config import llm, embedding_model
+
+
+def _get_retrievers():
+    """惰性获取检索器（由 FastAPI startup 初始化后可用）"""
+    from . import vector_retriever, bm25_retriever
+    if vector_retriever is None or bm25_retriever is None:
+        raise RuntimeError(
+            "检索器尚未初始化，请先调用 core.init() 或 vector_store.init_vector_store()"
+        )
+    return vector_retriever, bm25_retriever
 
 
 # ===================== 意图路由：关键词列表 =====================
@@ -146,6 +155,7 @@ def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int) -> List[str]:
     return [chunk for chunk, _ in dedup_semantic_list[:top_n]]
 # ===================== 向量加BM25并行函数=====================
 def parallel_vec_BM25_retriever(query:str):
+    vector_retriever, bm25_retriever = _get_retrievers()
     #定义独立检索任务
     def vec_task():
         return vector_retriever.invoke(query)
@@ -164,14 +174,42 @@ def parallel_vec_BM25_retriever(query:str):
     return vec_docs, bm25_docs
 # ===================== 检索函数 =====================
 
-def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
-    """
-    纯检索（不生成）：向量检索 + BM25 → RRF 融合 +向量去重→ 返回 top_n chunks
-    用于子问题收集 chunk 场景
-    """
+def _lookup_chunk_meta(chunk_text: str):
+    """从 ChromaDB 查找 chunk 的元数据（source, type）"""
+    from .vector_store import chromadb_collection
+    if chromadb_collection is None:
+        return {"source": "未知文档", "type": "未知"}
     try:
-        vec_docs, bm25_docs= parallel_vec_BM25_retriever(query)
-        return reciprocal_rank_fusion(vec_docs,bm25_docs, k=60, top_n=top_n)
+        result = chromadb_collection.get(where_document={"$contains": chunk_text[:80]})
+        if result and result.get("metadatas") and len(result["metadatas"]) > 0:
+            meta = result["metadatas"][0]
+            if meta:
+                return meta
+    except Exception:
+        pass
+    return {"source": "未知文档", "type": "未知"}
+
+
+def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
+    """纯检索：向量检索 + BM25 → RRF 融合 + 向量去重 → 返回 top_n chunks"""
+    try:
+        vec_docs, bm25_docs = parallel_vec_BM25_retriever(query)
+        return reciprocal_rank_fusion(vec_docs, bm25_docs, k=60, top_n=top_n)
+    except Exception as e:
+        print(f"检索超时或失败: {e}")
+        return []
+
+
+def my_rag_retrieve_with_meta(query: str, top_n: int = 15) -> list[dict]:
+    """检索 + 附带元数据：返回 [{text, source, type}, ...]"""
+    try:
+        vec_docs, bm25_docs = parallel_vec_BM25_retriever(query)
+        chunk_texts = reciprocal_rank_fusion(vec_docs, bm25_docs, k=60, top_n=top_n)
+        results = []
+        for text in chunk_texts:
+            meta = _lookup_chunk_meta(text)
+            results.append({"text": text, "source": meta.get("source", "未知"), "type": meta.get("type", "未知")})
+        return results
     except Exception as e:
         print(f"检索超时或失败: {e}")
         return []
