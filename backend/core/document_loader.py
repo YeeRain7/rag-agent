@@ -14,7 +14,7 @@ def clean_markdown(text: str) -> str:
     text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
     text = re.sub(r'<img.*?>', '', text)
     text = re.sub(r'<Image.*?>', '', text)
-    
+
     # 2. 移除网页链接，只保留链接文字
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
 
@@ -83,7 +83,11 @@ def load_all_docs(folder_path: str, max_workers: int = 4) -> list[str]:
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         task_futures = [executor.submit(load_single_file, fp) for fp in file_paths]
         for future in as_completed(task_futures):
-            all_chunks.extend(future.result())
+            try:
+                chunks = future.result()
+                all_chunks.extend(chunks)
+            except Exception as e:
+                print(f"警告：加载文件时发生异常：{str(e)}")
     all_chunks = list(dict.fromkeys(all_chunks))
     print(f"总计加载 {len(all_chunks)} 个有效片段")
     return all_chunks
@@ -118,7 +122,11 @@ def load_all_docs_with_meta(folder_path: str, max_workers: int = 4):
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_load_with_source, fp): fp for fp in file_paths}
         for future in as_completed(futures):
-            chunks, metas = future.result()
+            try:
+                chunks, metas = future.result()
+            except Exception as e:
+                print(f"警告：加载文件时发生异常：{str(e)}")
+                continue
             # 去重
             seen = set(all_chunks)
             for c, m in zip(chunks, metas):
