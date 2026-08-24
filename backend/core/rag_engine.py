@@ -97,6 +97,7 @@ def llm_router(query: str) -> str:
         return "knowledge"
 
 # ===================== 语义相似度去重 =====================
+
 def deduplicate_semantic(sorted_text_score_list,threshold=0.85):
     """
     依赖 embedding 计算相似度，仅保留排序靠前的高优先级片段：
@@ -154,6 +155,7 @@ def reciprocal_rank_fusion(*doc_lists, k: int = 60, top_n: int) -> List[str]:
 
     return [chunk for chunk, _ in dedup_semantic_list[:top_n]]
 # ===================== 向量加BM25并行函数=====================
+
 def parallel_vec_BM25_retriever(query:str):
     vector_retriever, bm25_retriever = _get_retrievers()
     #定义独立检索任务
@@ -190,8 +192,8 @@ def _lookup_chunk_meta(chunk_text: str):
     return {"source": "未知文档", "type": "未知"}
 
 
-def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
-    """纯检索：向量检索 + BM25 → RRF 融合 + 向量去重 → 返回 top_n chunks"""
+def my_rag_retrieve(query: str, top_n: int) -> List[str]:
+    """纯检索：向量检索 + BM25 → RRF 融合 → 返回 top_n chunks"""
     try:
         vec_docs, bm25_docs = parallel_vec_BM25_retriever(query)
         return reciprocal_rank_fusion(vec_docs, bm25_docs, k=60, top_n=top_n)
@@ -200,7 +202,7 @@ def my_rag_retrieve(query: str, top_n: int = 15) -> List[str]:
         return []
 
 
-def my_rag_retrieve_with_meta(query: str, top_n: int = 15) -> list[dict]:
+def my_rag_retrieve_with_meta(query: str, top_n: int) -> list[dict]:
     """检索 + 附带元数据：返回 [{text, source, type}, ...]"""
     try:
         vec_docs, bm25_docs = parallel_vec_BM25_retriever(query)

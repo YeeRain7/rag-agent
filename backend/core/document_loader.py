@@ -13,7 +13,8 @@ def clean_markdown(text: str) -> str:
     # 1. 移除图片（RAG看不了图，全删掉）
     text = re.sub(r'!\[.*?\]\(.*?\)', '', text)
     text = re.sub(r'<img.*?>', '', text)
-
+    text = re.sub(r'<Image.*?>', '', text)
+    
     # 2. 移除网页链接，只保留链接文字
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
 
